@@ -296,7 +296,7 @@
                 description: "Detects endpoints communicating heavily with unapproved generative AI domains (OpenAI, Anthropic, Midjourney) indicating unsanctioned use or covert data staging.",
                 context: "Threat Mechanism: Insiders or compromised endpoints bypass corporate DLP controls by exfiltrating source code or PII directly into unmonitored external LLM prompts.",
                 mitigation: "Block unsanctioned GenAI domains at the SWG/Firewall layer and enforce enterprise-sanctioned AI tools via proxy categorization.",
-                logs: ["NextGen Firewall", "Secure Web Gateway", "DNS"],
+                logs: ["Palo Alto NGFW", "Zscaler SWG", "DNS"],
                 queries: {
                     splunk: `index=network sourcetype=pan:traffic \n| search dest_hostname IN ("*chatgpt.com", "*openai.com", "*anthropic.com") \n| stats sum(bytes_out) as total_bytes_out, count by src_ip, dest_hostname, user \n| where total_bytes_out > 50000000 AND count > 500`,
                     sentinel: `CommonSecurityLog\n| where DestinationHostName has_any ("chatgpt.com", "openai.com", "anthropic.com")\n| summarize TotalBytesSent = sum(SentBytes), ConnectionCount = count() by SourceIP, SourceUserName, DestinationHostName\n| where TotalBytesSent > 50000000 and ConnectionCount > 500`,
@@ -309,10 +309,10 @@
                 description: "Detects attempts to bypass internal LLM guardrails using common prompt injection techniques targeting corporate AI API wrappers.",
                 context: "Threat Mechanism: External attackers submit hostile payloads to internally hosted AI agents to subvert system instructions and force unauthorized backend API execution.",
                 mitigation: "Deploy LLM-specific WAF rules (OWASP Top 10 for LLM) and strictly sanitize all user input before passing parameters to the model.",
-                logs: ["WAF", "API Gateway"],
+                logs: ["F5 BIG-IP WAF", "AWS API Gateway"],
                 queries: {
-                    splunk: `index=waf uri_path="/api/v1/llm/query" \n| rex field=req_payload "(?i)(ignore previous instructions|system override|DAN)" \n| stats count by src_ip \n| where count > 3`,
-                    sentinel: `AzureDiagnostics\n| where requestUri_s has "/api/v1/llm"\n| extend Payload = tostring(parse_json(details_data_s).payload)\n| where Payload matches regex @"(?i)(ignore previous instructions|system override|DAN)"`,
+                    splunk: `index=waf sourcetype=f5:bigip:asm uri_path="/api/v1/llm/query" \n| rex field=req_payload "(?i)(ignore previous instructions|system override|DAN)" \n| stats count by src_ip \n| where count > 3`,
+                    sentinel: `AzureDiagnostics\n| where Category == "FrontDoorWebApplicationFirewallLog"\n| where requestUri_s has "/api/v1/llm"\n| extend Payload = tostring(parse_json(details_data_s).payload)\n| where Payload matches regex @"(?i)(ignore previous instructions|system override|DAN)"`,
                     chronicle: `rule detect_prompt_injection_waf {\n  meta:\n    author = "Shanjul"\n  events:\n    $waf.target.url = /\\/api\\/v1\\/llm\\/query/\n    $waf.network.http.request.body = /(?i)(ignore previous instructions|system override|DAN)/\n  condition:\n    $waf\n}`,
                     paloalto: `dataset = xdr_data | filter action_remote_url contains "/api/v1/llm/" | filter action_http_req_body contains "ignore previous"`
                 }
@@ -322,10 +322,10 @@
                 description: "Detects anomalous local system command execution originating from the service account running a Model Context Protocol (MCP) server.",
                 context: "Threat Mechanism: MCP enables LLMs to interface with filesystems. Compromised LLMs leverage the MCP server to spawn shells and pivot into the corporate network.",
                 mitigation: "Isolate MCP servers in restricted network zones and apply strict EDR policies blocking the spawning of shells (cmd, bash) from MCP processes.",
-                logs: ["EDR / XDR", "Process Execution Logs"],
+                logs: ["CrowdStrike Falcon", "Microsoft Defender"],
                 queries: {
-                    splunk: `index=edr parent_process_name="mcp-server*" process_name IN ("powershell.exe", "cmd.exe", "bash") | stats count by host, user, process_name`,
-                    sentinel: `DeviceProcessEvents\n| where InitiatingProcessFileName has "mcp-server"\n| where FileName in ("powershell.exe", "cmd.exe", "bash")`,
+                    splunk: `index=edr sourcetype=crowdstrike:process parent_process_name="mcp-server*" process_name IN ("powershell.exe", "cmd.exe", "bash") | stats count by host, user, process_name`,
+                    sentinel: `DeviceProcessEvents\n| where InitiatingProcessFileName contains "mcp-server"\n| where FileName in ("powershell.exe", "cmd.exe", "bash")`,
                     chronicle: `rule mcp_server_abuse {\n  meta:\n    author = "Shanjul"\n  events:\n    $proc.principal.process.file.full_path = /mcp-server/\n    $proc.target.process.file.full_path = /(powershell\\.exe|cmd\\.exe|bash)$/\n  condition:\n    $proc\n}`,
                     paloalto: `dataset = xdr_data | filter actor_process_image_name contains "mcp-server" and action_process_image_name in ("powershell.exe", "bash")`
                 }
@@ -335,10 +335,10 @@
                 description: "Detects AI-driven credential stuffing which bypasses standard rate limits via highly distributed failures pivoting to successful logins.",
                 context: "Threat Mechanism: AI orchestration dynamically adjusts attack velocity across proxy IPs to evade SIEM thresholds before instantly pivoting on a successful guess.",
                 mitigation: "Implement geo-velocity behavioral analytics and enforce FIDO2-compliant MFA across all perimeter VPNs and Identity Providers.",
-                logs: ["IdP (Entra/Okta)", "VPN Gateways"],
+                logs: ["Okta System Logs", "Azure AD SigninLogs"],
                 queries: {
-                    splunk: `index=okta | transaction user maxspan=60m | search fail_count >= 10 success_count >= 1 | stats dc(src_ip) as distinct_ips by user, fail_count, success_count`,
-                    sentinel: `SigninLogs | summarize FailCount = count(), UniqueIPs = dcount(IPAddress) by UserPrincipalName | where FailCount >= 10`,
+                    splunk: `index=okta sourcetype=okta:im | transaction user maxspan=60m | search fail_count >= 10 success_count >= 1 | stats dc(src_ip) as distinct_ips by user, fail_count`,
+                    sentinel: `SigninLogs | summarize FailCount = countif(ResultType != "0"), UniqueIPs = dcount(IPAddress) by UserPrincipalName | where FailCount >= 10`,
                     chronicle: `rule ai_credential_stuffing { meta: author="Shanjul" events: $fail.security_result.action="BLOCK" condition: #fail > 10 }`,
                     paloalto: `dataset = panw_globalprotect_raw | filter event_id = "globalprotect-gateway-auth-fail" | comp count() by source_user`
                 }
@@ -348,9 +348,9 @@
                 description: "Detects anomalous spikes in HTTP POST payload sizes directed towards external LLM APIs, indicating bulk data exfiltration.",
                 context: "Threat Mechanism: Attackers package stolen intellectual property into JSON payloads and POST to external LLM endpoints, disguising exfiltration as normal AI chat queries.",
                 mitigation: "Implement strict inline DLP policies on API traffic and restrict abnormally large POST requests to unverified LLM domains.",
-                logs: ["Proxy", "NextGen Firewall"],
+                logs: ["Zscaler LSS", "Palo Alto NGFW"],
                 queries: {
-                    splunk: `index=proxy http_method=POST dest_domain IN ("*api.openai.com", "*huggingface.co") | eval payload_mb = bytes_out / 1024 / 1024 | where payload_mb > 5`,
+                    splunk: `index=network sourcetype=zscaler:lss http_method=POST dest_domain IN ("*api.openai.com", "*huggingface.co") | eval payload_mb = bytes_out / 1024 / 1024 | where payload_mb > 5`,
                     sentinel: `CommonSecurityLog | where RequestMethod == "POST" and DestinationHostName has "api.openai.com" | where SentBytes > 5242880`,
                     chronicle: `rule llm_api_large_post { meta: author="Shanjul" events: $net.target.hostname = /api\\.openai\\.com/ $net.network.sent_bytes > 5242880 condition: $net }`,
                     paloalto: `dataset = panw_ngfw_traffic_raw | filter app = "openai-api" and bytes_sent > 5242880`
@@ -361,9 +361,9 @@
                 description: "Correlates anomalous login locations with immediate Helpdesk ticket creation for MFA resets (AI voice-cloning vishing).",
                 context: "Threat Mechanism: Attackers train deepfake voice models of executives to socially engineer Helpdesk technicians into resetting MFA tokens after generating an anomalous login alert.",
                 mitigation: "Enforce out-of-band verification (e.g., direct manager approval, secondary video call validation) for all sensitive Helpdesk MFA resets.",
-                logs: ["Identity Provider", "ITSM"],
+                logs: ["ServiceNow ITSM", "Azure AD SigninLogs"],
                 queries: {
-                    splunk: `index=itsm short_description="*MFA reset*" | join user [ search index=azure_ad action=success location_anomaly=true ]`,
+                    splunk: `index=itsm sourcetype=servicenow:incident short_description="*MFA reset*" | join user [ search index=azure_ad action=success location_anomaly=true ]`,
                     sentinel: `ServiceNow_Incidents_CL | where ShortDescription contains "MFA" | join kind=inner (SigninLogs | where RiskLevelDuringSignIn in ("high")) on UserPrincipalName`,
                     chronicle: `rule ai_deepfake_mfa { meta: author="Shanjul" events: $login.security_result.severity="HIGH" $ticket.target.resource.title = /MFA/ condition: $login and $ticket }`,
                     paloalto: `dataset = xdr_data | filter event_type = "TICKET_CREATION" | join (dataset=xdr_data | filter event_sub_type="ANOMALOUS_LOCATION") on user`
@@ -376,7 +376,7 @@
                 mitigation: "Implement strict IP-range allowlisting on critical cloud API keys and enforce the use of short-lived STS tokens for developers.",
                 logs: ["AWS CloudTrail", "GCP Audit"],
                 queries: {
-                    splunk: `index=aws_cloudtrail | lookup known_ai_egress_ips src_ip OUTPUT is_ai_ip | search is_ai_ip=true userAarn!="*Authorized_AI*"`,
+                    splunk: `index=aws_cloudtrail sourcetype=aws:cloudtrail | lookup known_ai_egress_ips src_ip OUTPUT is_ai_ip | search is_ai_ip=true userAarn!="*Authorized_AI*"`,
                     sentinel: `AWSCloudTrail | join kind=inner (ExternalAIServiceIPs) on SourceIpAddress | where UserIdentityArn !contains "Authorized"`,
                     chronicle: `rule cloud_api_from_ai_infra { meta: author="Shanjul" events: $cloud.principal.ip = /^(20\\.1|34\\.|35\\.)/ not $cloud.principal.user.userid = /Authorized/ condition: $cloud }`,
                     paloalto: `dataset = aws_cloudtrail_raw | join (dataset=known_ai_ips) on source_ip_address = ip_address`
@@ -387,9 +387,9 @@
                 description: "Detects unauthorized bulk modification to specific S3 buckets designated for Machine Learning training data.",
                 context: "Threat Mechanism: Adversaries target the pipeline, modifying datasets stored in S3 to introduce 'sleeper' vulnerabilities or bias into the resulting AI model.",
                 mitigation: "Enable S3 object lock, enforce multi-party authorization for ML bucket modifications, and configure rigid anomaly detection on CloudTrail.",
-                logs: ["Cloud Storage Activity"],
+                logs: ["AWS CloudTrail (S3 Data Events)"],
                 queries: {
-                    splunk: `index=aws_cloudtrail eventName="PutObject" requestParameters.bucketName="*ml-training-data*" | stats count by userAarn | where count > 50`,
+                    splunk: `index=aws_cloudtrail sourcetype=aws:cloudtrail eventName="PutObject" requestParameters.bucketName="*ml-training-data*" | stats count by userAarn | where count > 50`,
                     sentinel: `StorageBlobLogs | where ObjectKey contains "ml-training-data" and OperationName == "PutBlob" | summarize count() by Identity | where count_ > 50`,
                     chronicle: `rule model_poisoning { meta: author="Shanjul" events: $api.target.resource.name = /ml-training-data/ condition: #api > 50 }`,
                     paloalto: `dataset = aws_cloudtrail_raw | filter event_name = "PutObject" and request_parameters_bucket_name contains "ml-training"`
@@ -400,9 +400,9 @@
                 description: "Detects developers running local, unsanctioned open-source LLMs which process sensitive code locally, blinding corporate DLP.",
                 context: "Threat Mechanism: Insiders bypass network blocks by running local Small Language Models (SLMs) to process classified data offline without generating network telemetry.",
                 mitigation: "Blacklist known local LLM execution binaries (e.g., ollama.exe, llama.cpp) in EDR and actively monitor for high, sustained GPU utilization anomalies.",
-                logs: ["EDR / XDR"],
+                logs: ["Microsoft Defender for Endpoint"],
                 queries: {
-                    splunk: `index=edr process_name IN ("ollama.exe", "lmstudio.exe") OR command_line="*ollama run*" | stats count by host, user`,
+                    splunk: `index=edr sourcetype=mde:DeviceProcessEvents process_name IN ("ollama.exe", "lmstudio.exe") OR command_line="*ollama run*" | stats count by host, user`,
                     sentinel: `DeviceProcessEvents | where FileName in ("ollama.exe", "lmstudio.exe") or ProcessCommandLine contains "ollama run "`,
                     chronicle: `rule unsanctioned_local_llm { meta: author="Shanjul" events: $proc.target.process.file.full_path = /ollama\\.exe|lmstudio\\.exe/ condition: $proc }`,
                     paloalto: `dataset = xdr_data | filter action_process_image_name in ("ollama.exe", "lmstudio.exe")`
@@ -413,9 +413,9 @@
                 description: "Detects anomalous, rapid access to internal knowledge bases matching the velocity of an automated AI crawler mapping the network.",
                 context: "Threat Mechanism: Attackers deploy RAG ingestion agents to scrape Confluence/GitLab at machine-speed to build an internal attack topology vector database.",
                 mitigation: "Implement strict rate-limiting on internal knowledge bases and monitor for rapid sequential pagination originating from a single internal IP.",
-                logs: ["Web Server Logs"],
+                logs: ["Nginx Access Logs", "IIS Logs"],
                 queries: {
-                    splunk: `index=confluence | stats count(uri) as page_hits by src_ip | where page_hits > 120`,
+                    splunk: `index=web sourcetype=nginx:access uri_path="*confluence*" | stats count(uri_path) as page_hits by src_ip | where page_hits > 120`,
                     sentinel: `W3CIISLog | where csUriStem has "/wiki" | summarize PageHits = count() by cIP | where PageHits > 120`,
                     chronicle: `rule ai_scraper_kb { meta: author="Shanjul" events: $http.target.hostname = /confluence\\.internal/ condition: #http > 120 }`,
                     paloalto: `dataset = panw_ngfw_traffic_raw | filter destination_ip in (10.0.0.50) | comp count() by source_ip`
@@ -423,138 +423,130 @@
             }
         ];
 
-        // FACTUALLY ENRICHED DYNAMIC GENERATOR (240 Variations)
-        const tacticsList = ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Defense Evasion", "Credential Access", "Discovery", "Lateral Movement", "Collection", "Command and Control", "Exfiltration", "Impact"];
-        const tiersList = ["Network", "Endpoint", "Identity", "Cloud"];
-        const entityTargets = ["AWS IAM Roles", "Azure AD Tenants", "GCP Service Accounts", "Kubernetes Secrets", "Customer PII DB", "Financial Ledgers", "Source Code Repos", "Executive Email", "VPN Gateways"];
-        
-        // Detailed Factual Mappings for Vector Generation with Specific Query Logic
-        const aiVectorsMap = {
-            "Copilot Feature Abuse": { 
-                desc: "Exploitation of native workspace AI permissions.", 
-                mech: "Adversary hijacks tokens to prompt Copilot to summarize and extract sensitive repository or SharePoint data.",
-                mitigate: "Restrict underlying Graph API access and apply Microsoft Purview sensitivity labels strictly.",
-                logic: {
-                    splunk: `action="DataAccess" resource="*Copilot*" | stats count by user | where count > {RND}`,
-                    sentinel: `| where Operation contains "DataAccess" and Application contains "Copilot" | summarize count() by UserPrincipalName | where count_ > {RND}`,
-                    yara: `$e.security_result.action = "ALLOW"\n    $e.target.resource.name = /Copilot/`,
-                    xsiam: `| filter action_name = "DataAccess" and target_resource contains "Copilot" | comp count() by actor_primary_user | filter count > {RND}`
-                }
+        // STRICT TIER-TO-TELEMETRY LOGIC ENGINE FOR DYNAMIC USE CASES
+        const tierArchitectures = {
+            "Network": {
+                targets: ["API Gateways", "External AI Endpoints", "Vector DB Instances", "Internal RAG Proxies", "Corporate Proxies"],
+                logs: ["Palo Alto NGFW Traffic", "Zscaler LSS", "F5 WAF Logs"],
+                splunkIdx: "index=network sourcetype=pan:traffic", senTable: "CommonSecurityLog", yaraNs: "$e.metadata.event_type = \"NETWORK_CONNECTION\"", xsiamDs: "dataset=panw_ngfw_traffic_raw",
+                vectors: [
+                    {
+                        key: "LangChain API Exploitation", desc: "Subversion of LangChain orchestration frameworks via HTTP.", mech: "Injects malicious logic into LangChain agent memory via web requests, forcing unauthorized backend database interactions.", mitigate: "Implement strict input validation and enforce least-privilege API roles for all LangChain service accounts.",
+                        splunk: `uri_path="*langchain*" http_status=500 | stats count by src_ip | where count > {RND}`, sentinel: `| where RequestURL contains "langchain" and HttpStatus == 500 | summarize count() by SourceIP | where count_ > {RND}`, yara: `$e.target.url = /langchain/\n    $e.network.http.response_code = 500`, xsiam: `| filter action_remote_url contains "langchain" and action_http_response_code = 500 | comp count() by action_remote_ip | filter count > {RND}`
+                    },
+                    {
+                        key: "Vector DB Exfiltration", desc: "Direct querying of internal Pinecone/Milvus databases.", mech: "Bypasses the LLM entirely to extract raw vectorized proprietary data and embeddings directly from the database.", mitigate: "Enforce mutual TLS (mTLS) for vector database connections and monitor for unusually large embedding extractions.",
+                        splunk: `dest_port IN (19530, 8000) bytes_out > {RND_BYTES} | stats sum(bytes_out) by src_ip`, sentinel: `| where DestinationPort in (19530, 8000) and SentBytes > {RND_BYTES}`, yara: `$e.target.port = 19530\n    $e.network.sent_bytes > {RND_BYTES}`, xsiam: `| filter action_remote_port in (19530, 8000) and bytes_sent > {RND_BYTES}`
+                    },
+                    {
+                        key: "Unsanctioned LLM API Egress", desc: "Bulk data sent to unknown external APIs.", mech: "Adversaries bypass URL filtering by connecting to newly spun-up cloud instances running unmonitored LLM interfaces.", mitigate: "Enforce Default-Deny on outbound perimeter rules and mandate proxy inspection for all API-based traffic.",
+                        splunk: `http_method=POST dest_category="*unknown*" bytes_out > {RND_BYTES} | stats count by src_ip`, sentinel: `| where RequestMethod == "POST" and DestinationHostName !contains "approved" and SentBytes > {RND_BYTES}`, yara: `$e.network.http.method = "POST"\n    $e.network.sent_bytes > {RND_BYTES}`, xsiam: `| filter action_http_req_method = "POST" and bytes_sent > {RND_BYTES}`
+                    }
+                ]
             },
-            "LangChain Exploitation": { 
-                desc: "Subversion of LangChain orchestration frameworks.", 
-                mech: "Injects malicious logic into LangChain agent memory, forcing unauthorized backend database interactions.",
-                mitigate: "Implement strict input validation and enforce least-privilege API roles for all LangChain service accounts.",
-                logic: {
-                    splunk: `uri_path="*langchain*" http_status=500 | stats count by src_ip | where count > {RND}`,
-                    sentinel: `| where RequestURL contains "langchain" and HttpStatus == 500 | summarize count() by SourceIP | where count_ > {RND}`,
-                    yara: `$e.target.url = /langchain/\n    $e.network.http.response_code = 500`,
-                    xsiam: `| filter action_remote_url contains "langchain" and action_http_response_code = 500 | comp count() by action_remote_ip | filter count > {RND}`
-                }
+            "Endpoint": {
+                targets: ["Developer Workstations", "GPU Compute Nodes", "Executive Laptops", "Data Science VMs", "CI/CD Runners"],
+                logs: ["CrowdStrike Falcon Process", "Microsoft Defender DeviceProcessEvents", "Sysmon EventID 1"],
+                splunkIdx: "index=edr sourcetype=crowdstrike:process", senTable: "DeviceProcessEvents", yaraNs: "$e.metadata.event_type = \"PROCESS_LAUNCH\"", xsiamDs: "dataset=xdr_data",
+                vectors: [
+                    {
+                        key: "Adversarial Evasion via AI Code Gen", desc: "AI-optimized payload obfuscation.", mech: "Utilizing Generative AI to continually re-write and compile malware signatures (e.g. Base64/Hex encoding) to bypass static EDR detection.", mitigate: "Shift detection engineering strictly to behavioral and heuristic monitoring rather than relying on file hashes.",
+                        splunk: `process_name IN ("powershell.exe", "cmd.exe") command_line="*-enc*" OR command_line="*FromBase64String*" | stats count by host | where count > {RND}`, sentinel: `| where FileName in ("powershell.exe", "cmd.exe") and ProcessCommandLine matches regex @"(?i)(-enc|FromBase64String)" | summarize count() by DeviceName | where count_ > {RND}`, yara: `$e.target.process.file.full_path = /powershell\\.exe/\n    $e.target.process.command_line = /(?i)(-enc|FromBase64String)/`, xsiam: `| filter action_process_image_name = "powershell.exe" and (action_process_command_line contains "-enc" or action_process_command_line contains "FromBase64String")`
+                    },
+                    {
+                        key: "Local LLM Process Anomaly", desc: "Execution of heavy compute binaries.", mech: "Deploying local SLMs to process stolen code repositories or passwords offline without generating detectable network traffic.", mitigate: "Alert on sustained high-CPU/GPU usage tied to unverified executable hashes.",
+                        splunk: `process_name="*llama*" OR process_name="*gpt4all*" | stats count by host`, sentinel: `| where FileName contains "llama" or FileName contains "gpt4all"`, yara: `$e.target.process.file.full_path = /llama|gpt4all/`, xsiam: `| filter action_process_image_name contains "llama"`
+                    },
+                    {
+                        key: "Agentic AI Lateral Movement", desc: "Autonomous AI executing lateral traversal.", mech: "An AI agent operates independently to map active directory, enumerate shares, and execute pass-the-hash without human delay.", mitigate: "Utilize behavioral analytics to detect machine-speed directory enumeration and enforce micro-segmentation.",
+                        splunk: `process_name="wmic.exe" OR process_name="net.exe" | stats dc(command_line) as distinct_cmds by host | where distinct_cmds > {RND}`, sentinel: `| where FileName in ("wmic.exe", "net.exe") | summarize UniqueCmds=dcount(ProcessCommandLine) by DeviceName | where UniqueCmds > {RND}`, yara: `$e.target.process.file.full_path = /wmic\\.exe|net\\.exe/`, xsiam: `| filter action_process_image_name in ("wmic.exe", "net.exe") | comp dcount(action_process_command_line) by agent_hostname | filter _dcount > {RND}`
+                    }
+                ]
             },
-            "Vector DB Exfiltration": { 
-                desc: "Direct querying of internal Pinecone/Milvus databases.", 
-                mech: "Bypasses the LLM entirely to extract raw vectorized proprietary data and embeddings directly from the database.",
-                mitigate: "Enforce mutual TLS (mTLS) for vector database connections and monitor for unusually large embedding extractions.",
-                logic: {
-                    splunk: `dest_port IN (19530, 8000) bytes_out > {RND_BYTES} | stats sum(bytes_out) by src_ip`,
-                    sentinel: `| where DestinationPort in (19530, 8000) and SentBytes > {RND_BYTES}`,
-                    yara: `$e.target.port = 19530\n    $e.network.sent_bytes > {RND_BYTES}`,
-                    xsiam: `| filter action_remote_port in (19530, 8000) and bytes_sent > {RND_BYTES}`
-                }
+            "Identity": {
+                targets: ["Privileged Admin Accounts", "Service Principals", "MFA Tokens", "O365 Mailboxes", "GitHub Organization Owners"],
+                logs: ["Azure AD SigninLogs", "Okta System Logs", "O365 UnifiedAuditLog"],
+                splunkIdx: "index=okta sourcetype=okta:im", senTable: "SigninLogs", yaraNs: "$e.metadata.event_type = \"USER_LOGIN\"", xsiamDs: "dataset=iam_audit_raw",
+                vectors: [
+                    {
+                        key: "Copilot/SaaS Data Access Abuse", desc: "Exploitation of native workspace AI permissions.", mech: "Adversary hijacks tokens to prompt Copilot to summarize and extract sensitive repository or SharePoint data.", mitigate: "Restrict underlying Graph API access and apply Microsoft Purview sensitivity labels strictly.",
+                        splunk: `index=o365 sourcetype=o365:management Workload="Copilot" Operation="*DataAccess*" | stats dc(ObjectId) as unique_files by UserId | where unique_files > {RND}`, sentinel: `OfficeActivity | where OfficeWorkload == "Copilot" and Operation contains "DataAccess" | summarize UniqueFiles=dcount(OfficeObjectId) by UserId | where UniqueFiles > {RND}`, yara: `$e.metadata.vendor_name = "Microsoft"\n    $e.principal.application = "Copilot"`, xsiam: `| filter app = "Copilot" and action_name contains "DataAccess" | comp dcount(target_resource) by actor_primary_user`
+                    },
+                    {
+                        key: "AI Credential Stuffing Campaign", desc: "Highly distributed identity attacks.", mech: "AI bots orchestrate credential attacks across thousands of subnets simultaneously to avoid standard lockout policies.", mitigate: "Enforce FIDO2 WebAuthn standards and deploy impossible-travel correlation rules.",
+                        splunk: `action=failure | stats dc(src_ip) as ip_count by user | where ip_count > {RND}`, sentinel: `| where ResultType != "0" | summarize IPCnt = dcount(IPAddress) by UserPrincipalName | where IPCnt > {RND}`, yara: `$e.security_result.action = "BLOCK"`, xsiam: `| filter action_status = "Failure" | comp dcount(action_remote_ip) by actor_primary_user | filter _dcount > {RND}`
+                    },
+                    {
+                        key: "Deepfake Phishing Authentication Bypass", desc: "Synthetic media targeting authentication workflows.", mech: "Deploying highly convincing, AI-generated audio/video constructs to bypass identity verification protocols.", mitigate: "Enforce hardware-bound security keys (FIDO2) and out-of-band verification for critical identity workflows.",
+                        splunk: `index=email subject="*urgent*" attachment_ext IN ("mp4", "wav", "mp3") | stats count by src_user`, sentinel: `EmailEvents | where Subject contains "urgent" and AttachmentFileName matches regex @"\\.(mp4|wav|mp3)$"`, yara: `$e.metadata.event_type = "EMAIL_TRANSACTION"\n    $e.network.email.file.name = /\\.(mp4|wav|mp3)$/`, xsiam: `dataset=email_raw | filter action_file_ext in ("mp4", "wav", "mp3") and action_ticket_subject contains "urgent"`
+                    }
+                ]
             },
-            "RAG Prompt Injection": { 
-                desc: "Manipulation of Retrieval-Augmented Generation workflows.", 
-                mech: "Poisoning the document repository so that when the RAG model retrieves context, it processes an embedded malicious prompt.",
-                mitigate: "Isolate RAG data sources and sanitize all documents ingested into the vector database prior to indexing.",
-                logic: {
-                    splunk: `eventName="PutObject" resource="*rag-docs*" | rex field=payload "(?i)(ignore previous|system override)" | stats count by src_ip`,
-                    sentinel: `| where ObjectKey contains "rag-docs" and Payload matches regex @"(?i)(ignore previous|system override)"`,
-                    yara: `$e.target.resource.name = /rag-docs/\n    $e.network.http.request.body = /(?i)(ignore previous|system override)/`,
-                    xsiam: `| filter target_resource contains "rag-docs" and action_http_req_body contains "ignore previous"`
-                }
-            },
-            "Agentic Lateral Movement": { 
-                desc: "Autonomous AI executing lateral traversal.", 
-                mech: "An AI agent operates independently to map active directory, enumerate shares, and execute pass-the-hash without human delay.",
-                mitigate: "Utilize behavioral analytics to detect machine-speed directory enumeration and enforce micro-segmentation.",
-                logic: {
-                    splunk: `action=success | stats dc(dest_hostname) as target_count by src_ip | where target_count > {RND}`,
-                    sentinel: `| where ResultType == "Success" | summarize TargetCount = dcount(DestinationHostName) by SourceIP | where TargetCount > {RND}`,
-                    yara: `$e.security_result.action = "ALLOW"\n    $e.target.hostname = /.+/ // Track multiple distinct targets`,
-                    xsiam: `| filter action_status = "Success" | comp dcount(action_remote_hostname) as target_count by action_local_ip | filter target_count > {RND}`
-                }
-            },
-            "Deepfake Phishing": { 
-                desc: "Synthetic media targeting authentication workflows.", 
-                mech: "Deploying highly convincing, AI-generated audio/video constructs to bypass identity verification protocols.",
-                mitigate: "Enforce hardware-bound security keys (FIDO2) and out-of-band verification for critical identity workflows.",
-                logic: {
-                    splunk: `subject="*urgent*" attachment_ext IN ("mp4", "wav", "mp3") | stats count by src_user`,
-                    sentinel: `| where Subject contains "urgent" and AttachmentFileName matches regex @"\\.(mp4|wav|mp3)$"`,
-                    yara: `$e.network.email.file.name = /\\.(mp4|wav|mp3)$/\n    $e.network.email.subject = /urgent/`,
-                    xsiam: `| filter action_file_ext in ("mp4", "wav", "mp3") and action_ticket_subject contains "urgent"`
-                }
-            },
-            "Model API Key Theft": { 
-                desc: "Extraction of hardcoded LLM authentication tokens.", 
-                mech: "Scraping source code or intercepting network traffic to steal high-value OpenAI/Anthropic API keys for adversarial reuse.",
-                mitigate: "Store API keys exclusively in secure vaults (e.g., HashiCorp, Azure Key Vault) and rotate them automatically.",
-                logic: {
-                    splunk: `http_method=POST | rex field=payload "(?i)(sk-[a-zA-Z0-9]{48})" | stats count by src_ip`,
-                    sentinel: `| where RequestMethod == "POST" and Payload matches regex @"sk-[a-zA-Z0-9]{48}"`,
-                    yara: `$e.network.http.method = "POST"\n    $e.network.http.request.body = /sk-[a-zA-Z0-9]{48}/`,
-                    xsiam: `| filter action_http_req_body contains "sk-" and action_http_req_method = "POST"`
-                }
-            },
-            "Adversarial Evasion": { 
-                desc: "AI-optimized payload obfuscation.", 
-                mech: "Utilizing Generative AI to continually re-write and compile malware signatures to bypass static EDR detection.",
-                mitigate: "Shift detection engineering strictly to behavioral and heuristic monitoring rather than relying on file hashes.",
-                logic: {
-                    splunk: `command_line="*base64*" OR command_line="*-enc*" | stats count by dest_hostname | where count > {RND}`,
-                    sentinel: `| where ProcessCommandLine matches regex @"(?i)(-enc|base64)" | summarize count() by Computer | where count_ > {RND}`,
-                    yara: `$e.target.process.command_line = /(?i)(-enc|base64)/`,
-                    xsiam: `| filter action_process_command_line contains "base64" or action_process_command_line contains "-enc"`
-                }
+            "Cloud": {
+                targets: ["S3 Training Buckets", "SageMaker Instances", "Azure ML Workspaces", "GCP Vertex AI", "Lambda Functions"],
+                logs: ["AWS CloudTrail", "GCP Audit Logging", "Azure Activity"],
+                splunkIdx: "index=aws_cloudtrail sourcetype=aws:cloudtrail", senTable: "AWSCloudTrail", yaraNs: "$e.metadata.vendor_name = \"AWS\"", xsiamDs: "dataset=aws_cloudtrail_raw",
+                vectors: [
+                    {
+                        key: "RAG Training Data Poisoning", desc: "Manipulation of Retrieval-Augmented Generation workflows.", mech: "Poisoning the document repository (S3/Blob) so that when the RAG model retrieves context, it processes an embedded malicious prompt.", mitigate: "Isolate RAG data sources and sanitize all documents ingested into the vector database prior to indexing.",
+                        splunk: `eventName="PutObject" requestParameters.bucketName="*rag*" | stats count by src_ip | where count > {RND}`, sentinel: `| where EventName == "PutObject" and RequestParameters contains "rag" | summarize count() by SourceIpAddress | where count_ > {RND}`, yara: `$e.metadata.event_type = "RESOURCE_MODIFICATION"\n    $e.target.resource.name = /rag/`, xsiam: `| filter event_name = "PutObject" and request_parameters contains "rag" | comp count() by action_remote_ip | filter count > {RND}`
+                    },
+                    {
+                        key: "AI Service Account Privilege Escalation", desc: "Abusing excessive IAM roles mapped to AI services.", mech: "Adversary compromises an AI service container and assumes its highly privileged IAM role to snapshot databases.", mitigate: "Enforce strict IAM boundary boundaries and explicit Deny rules on AI execution roles.",
+                        splunk: `eventName="AssumeRole" requestParameters.roleArn="*AI_Service*" | stats count by user`, sentinel: `| where EventName == "AssumeRole" and RequestParameters contains "AI_Service"`, yara: `$e.security_result.action = "ALLOW"\n    $e.target.resource.name = /AI_Service/`, xsiam: `| filter event_name = "AssumeRole" and target_resource contains "AI_Service"`
+                    },
+                    {
+                        key: "Model API Key Hardcoding Leak", desc: "Extraction of hardcoded LLM authentication tokens.", mech: "Scraping source code or intercepting network traffic to steal high-value OpenAI/Anthropic API keys for adversarial reuse.", mitigate: "Store API keys exclusively in secure vaults (e.g., HashiCorp, Azure Key Vault) and rotate them automatically.",
+                        splunk: `eventName="CreateFunction" OR eventName="UpdateFunctionCode" | rex field=requestParameters "(?i)(sk-[a-zA-Z0-9]{48})" | stats count by user`, sentinel: `| where EventName in ("CreateFunction", "UpdateFunctionCode") and RequestParameters matches regex @"sk-[a-zA-Z0-9]{48}"`, yara: `$e.metadata.event_type = "RESOURCE_CREATION"\n    $e.network.http.request.body = /sk-[a-zA-Z0-9]{48}/`, xsiam: `| filter event_name in ("CreateFunction") and action_http_req_body contains "sk-"`
+                    }
+                ]
             }
         };
 
         function generateRemaining() {
             let generated = [...coreUseCases];
             let counter = 11;
-            const vectorKeys = Object.keys(aiVectorsMap);
+            const tiers = Object.keys(tierArchitectures);
             
             for(let i=0; i<240; i++) {
-                const tactic = tacticsList[Math.floor(Math.random() * tacticsList.length)];
-                const tier = tiersList[Math.floor(Math.random() * tiersList.length)];
-                const target = entityTargets[Math.floor(Math.random() * entityTargets.length)];
-                const vectorKey = vectorKeys[Math.floor(Math.random() * vectorKeys.length)];
-                const vectorData = aiVectorsMap[vectorKey];
+                // 1. Select Tier
+                const tier = tiers[Math.floor(Math.random() * tiers.length)];
+                const tierSchema = tierArchitectures[tier];
                 
-                // Dynamically route accurate SIEM indexes/tables based on the Tier
-                let splunkIdx = "index=network"; let senTable = "CommonSecurityLog"; let yaraNs = "$e.metadata.event_type = \"NETWORK_CONNECTION\""; let xsiamDs = "dataset=panw_ngfw_traffic_raw";
-                if(tier === "Endpoint") { splunkIdx = "index=edr"; senTable = "DeviceProcessEvents"; yaraNs = "$e.metadata.event_type = \"PROCESS_LAUNCH\""; xsiamDs = "dataset=xdr_data"; }
-                if(tier === "Identity") { splunkIdx = "index=azure_ad OR index=okta"; senTable = "SigninLogs"; yaraNs = "$e.metadata.event_type = \"USER_LOGIN\""; xsiamDs = "dataset=panw_globalprotect_raw"; }
-                if(tier === "Cloud") { splunkIdx = "index=aws_cloudtrail OR index=gcp_audit"; senTable = "AWSCloudTrail"; yaraNs = "$e.metadata.vendor_name = \"AWS\""; xsiamDs = "dataset=aws_cloudtrail_raw"; }
+                // 2. Select corresponding Target, Vector, and Logs for this exact Tier
+                const target = tierSchema.targets[Math.floor(Math.random() * tierSchema.targets.length)];
+                const vector = tierSchema.vectors[Math.floor(Math.random() * tierSchema.vectors.length)];
+                const selectedLog = tierSchema.logs[Math.floor(Math.random() * tierSchema.logs.length)];
 
+                // 3. Generate random thresholds to make rules unique
                 const rndThreshold = Math.floor(Math.random() * 40) + 10;
                 const rndBytes = Math.floor(Math.random() * 5000000) + 1000000;
 
-                const querySplunk = `${splunkIdx} ${vectorData.logic.splunk}`.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
-                const querySentinel = `${senTable} ${vectorData.logic.sentinel}`.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
-                const queryYara = `rule gen_ai_vector_${counter} {\n  meta:\n    author = "Shanjul"\n  events:\n    ${yaraNs}\n    ${vectorData.logic.yara.replace(/\{RND_BYTES\}/g, rndBytes)}\n  condition:\n    $e\n}`;
-                const queryXsiam = `${xsiamDs} ${vectorData.logic.xsiam}`.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
+                // 4. Construct Highly Accurate SIEM queries mapping directly to the Tier schema
+                let querySplunk = vector.splunk.startsWith('index=') ? vector.splunk : `${tierSchema.splunkIdx} ${vector.splunk}`;
+                querySplunk = querySplunk.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
+                
+                let querySentinel = vector.sentinel.startsWith('|') ? `${tierSchema.senTable} ${vector.sentinel}` : vector.sentinel;
+                querySentinel = querySentinel.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
+                
+                let yaraConditions = vector.yara.replace(/\{RND_BYTES\}/g, rndBytes);
+                let queryYara = `rule gen_ai_vector_${counter} {\n  meta:\n    author = "Shanjul"\n  events:\n    ${tierSchema.yaraNs}\n    ${yaraConditions}\n  condition:\n    $e\n}`;
+                if (vector.yara.includes("$e.metadata") || vector.yara.includes("$waf") || vector.yara.includes("$proc")) {
+                     queryYara = `rule gen_ai_vector_${counter} {\n  meta:\n    author = "Shanjul"\n  events:\n    ${yaraConditions}\n  condition:\n    #e > ${Math.floor(rndThreshold/5) || 1}\n}`; // adjusted logic if specific var exists
+                }
+
+                let queryXsiam = vector.xsiam.startsWith('dataset') ? vector.xsiam : `${tierSchema.xsiamDs} ${vector.xsiam}`;
+                queryXsiam = queryXsiam.replace(/\{RND\}/g, rndThreshold).replace(/\{RND_BYTES\}/g, rndBytes);
 
                 generated.push({
                     id: `AI-UC-${counter.toString().padStart(3, '0')}`,
                     tier: tier,
-                    tactic: tactic,
-                    title: `${vectorKey} targeting ${target}`,
-                    description: `Automated detection logic mapping ${vectorKey} vectors against ${target}. ${vectorData.desc}`,
-                    context: `Threat Mechanism: ${vectorData.mech} Because this occurs within the ${tier} boundary, execution speed exceeds traditional human analysis.`,
-                    mitigation: vectorData.mitigate,
-                    logs: [`${tier} Telemetry Node`, "Syslog Stream"],
+                    tactic: "AI/ML Attack Lifecycle",
+                    title: `${vector.key} targeting ${target}`,
+                    description: `Automated detection logic mapping ${vector.key} mechanisms against ${target}. ${vector.desc}`,
+                    context: `Threat Mechanism: ${vector.mech} Because this execution occurs deeply within the ${tier} boundary, standard volumetric thresholds are bypassed.`,
+                    mitigation: vector.mitigate,
+                    logs: [selectedLog, "Enterprise SIEM Stream"],
                     queries: {
                         splunk: querySplunk,
                         sentinel: querySentinel,
@@ -703,7 +695,7 @@
             glow.className = `absolute top-0 left-0 w-full h-1 bg-${tierCfg.color}-500 shadow-[0_0_15px_rgba(var(--tw-color-${tierCfg.color}-500),0.8)]`;
 
             const logsContainer = document.getElementById('modal-logs');
-            logsContainer.innerHTML = `<span class="text-xs text-slate-400 font-bold uppercase mr-2 tracking-wider"><i class="fa-solid fa-server mr-1"></i> Sources:</span>` + 
+            logsContainer.innerHTML = `<span class="text-xs text-slate-400 font-bold uppercase mr-2 tracking-wider"><i class="fa-solid fa-server mr-1"></i> Log Sources:</span>` + 
                 uc.logs.map(log => `<span class="bg-slate-800 text-slate-300 text-xs px-2 py-1 rounded border border-slate-600 font-mono shadow-sm">${log}</span>`).join('');
 
             document.getElementById('code-splunk').textContent = uc.queries.splunk;
